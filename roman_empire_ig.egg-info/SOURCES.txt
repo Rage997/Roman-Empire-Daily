@@ -1,0 +1,17 @@
+README.md
+pyproject.toml
+roman_empire_ig/__main__.py
+roman_empire_ig/cli.py
+roman_empire_ig/composer.py
+roman_empire_ig/config.py
+roman_empire_ig/fact_generator.py
+roman_empire_ig/image_generator.py
+roman_empire_ig/pipeline.py
+roman_empire_ig/poster.py
+roman_empire_ig.egg-info/PKG-INFO
+roman_empire_ig.egg-info/SOURCES.txt
+roman_empire_ig.egg-info/dependency_links.txt
+roman_empire_ig.egg-info/entry_points.txt
+roman_empire_ig.egg-info/requires.txt
+roman_empire_ig.egg-info/top_level.txt
+tests/test_pipeline.py

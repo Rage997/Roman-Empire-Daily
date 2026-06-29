@@ -1,0 +1,87 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name            = "roman-empire-ig"
+version         = "0.1.0"
+description     = "Automated Roman Empire Instagram bot: AI facts + AI images."
+readme          = "README.md"
+requires-python = ">=3.12"
+license         = { text = "MIT" }
+
+dependencies = [
+    # PyTorch — pinned to the CUDA index via [tool.uv.sources]
+    "torch>=2.5.0",
+    "torchvision>=0.20.0",
+
+    # Anthropic SDK — fact & prompt generation
+    "anthropic>=0.28.0",
+
+    # Diffusers stack — local FLUX image generation
+    "diffusers>=0.30.0",
+    "transformers>=4.44.0",
+    "accelerate>=0.33.0",
+    "safetensors>=0.4.3",
+    "sentencepiece>=0.2.0",
+
+    # Image processing
+    "Pillow>=10.4.0",
+
+    # Config / settings management
+    "pydantic-settings>=2.3.0",
+
+    # HTTP client for Instagram Graph API
+    "requests>=2.32.0",
+
+    # CLI
+    "click>=8.1.7",
+    "bitsandbytes>=0.43.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2.0",
+    "pytest-mock>=3.14.0",
+    "ruff>=0.5.0",
+    "mypy>=1.10.0",
+    "types-requests",
+]
+
+[project.scripts]
+roman-ig = "roman_empire_ig.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+# ── uv: force torch + torchvision to always come from the PyTorch CUDA index ──
+# This prevents any transitive dependency from pulling a CPU-only build from PyPI.
+# Change cu121 → cu118 if your drivers only support CUDA 11.8.
+[[tool.uv.index]]
+name     = "pytorch-cuda"
+url      = "https://download.pytorch.org/whl/cu121"
+explicit = true
+
+[tool.uv.sources]
+torch       = { index = "pytorch-cuda" }
+torchvision = { index = "pytorch-cuda" }
+
+# ── Ruff ──────────────────────────────────────────────────────────────────────
+[tool.ruff]
+line-length    = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+# ── Mypy ──────────────────────────────────────────────────────────────────────
+[tool.mypy]
+python_version         = "3.12"
+strict                 = false
+ignore_missing_imports = true
+
+# ── Pytest ────────────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+testpaths     = ["tests"]
+log_cli       = true
+log_cli_level = "INFO"

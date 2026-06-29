@@ -1,0 +1,2 @@
+[console_scripts]
+roman-ig = roman_empire_ig.cli:main
