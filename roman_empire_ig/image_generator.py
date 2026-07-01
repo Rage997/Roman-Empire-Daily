@@ -78,6 +78,9 @@ def generate_image(prompt: str) -> Image.Image:
     Returns:
         A PIL Image at the configured resolution.
     """
+
+    logger.info("Generating image with prompt: ", prompt)
+
     pipe = _load_pipeline()
 
     seed = settings.seed if settings.seed >= 0 else random.randint(0, 2**32 - 1)

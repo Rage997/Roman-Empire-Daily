@@ -1,1 +1,6 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+roman_empire_ig/data/recent_topics.json
 output/

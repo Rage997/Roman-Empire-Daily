@@ -1,13 +1,77 @@
 """
 fact_generator.py
-Returns a hardcoded Roman fact + image prompt for testing image generation.
-Replace this with a real LLM call (local or API) when ready.
+Generates a Roman daily-life fact + image-generation prompt using a local
+Ollama model (qwen3.6:27b). Replaces the hardcoded test stubs.
+
+Design notes:
+- The LLM only generates the *creative content* (topic, fact, scene
+  description). The photographic style boilerplate (camera, lighting,
+  "no CGI", etc.) is a fixed template appended in code — this keeps every
+  generated image stylistically consistent and gives the model a shorter,
+  more reliable generation target.
+- Output is constrained via Ollama's structured-outputs `format` parameter
+  (a JSON schema derived from a Pydantic model), not free-text parsing.
+  This also suppresses "thinking" mode automatically: JSON-grammar
+  constrained sampling and <think> token emission are mutually exclusive
+  in Ollama, so there's no need to separately disable reasoning traces.
+- Topics are drawn from a curated list (factually safer than free
+  generation) with simple recent-history avoidance to reduce repeats.
 """
 
+import json
 import logging
+import random
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
+
+from ollama import Client
+
+client = Client(host="http://localhost:11434")  # or http://<container-name>:11434 if both are on the same docker network
+
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
+
+OLLAMA_MODEL = "qwen3.6:27b"
+
+# Where we persist recently-used topics so repeats are avoided across runs,
+# not just within a single process.
+_STATE_PATH = Path(__file__).parent / "data" / "recent_topics.json"
+_RECENT_HISTORY_SIZE = 8
+
+# Curated topic pool. Keeping this list-driven (rather than letting the LLM
+# invent topics freely) constrains it to themes we've vetted for being
+# real, well-attested aspects of Roman daily life — reduces hallucination
+# risk on niche/invented "facts".
+TOPICS = [
+    "gladiators",
+    "aqueducts",
+    "public baths",
+    "the Roman forum marketplace",
+    "a legionary camp at dusk",
+    "a wealthy domus household",
+    "an insula tenement street",
+    "a harbor at Ostia",
+    "a provincial bread bakery",
+    "a Roman school (ludus)",
+    "a wine tavern (thermopolium)",
+    "a textile/dye workshop",
+    "a triumphal procession",
+    "a rural villa during harvest",
+    "a Roman funeral procession",
+    "chariot racing at the Circus Maximus",
+]
+
+# Fixed photographic style appended to every generated scene description.
+# Keeping this in code (not LLM-generated) guarantees consistent output
+# style across every image, regardless of topic.
+STYLE_SUFFIX = (
+    " Photographed on a Hasselblad H6D-400C, 50mm lens, f/2.8, ISO 200, "
+    "golden hour natural light, RAW photo, photorealistic, 8K, ultra detailed, "
+    "no CGI, no illustration, no painting, hyperrealistic skin and material textures, "
+    "avoid illustration style, avoid CGI, avoid painterly look, avoid anachronisms."
+)
 
 
 @dataclass
@@ -16,62 +80,104 @@ class RomanContent:
     image_prompt: str
 
 
-# Test stubs — add more here to rotate through different scenes
-_STUBS: dict[str, RomanContent] = {
-    "gladiators": RomanContent(
-        fact="Gladiators rarely fought to the death — they were expensive to train and crowds preferred skill over slaughter.",
-        image_prompt=(
-            "A cinematic scene inside the Colosseum in ancient Rome at golden hour. "
-            "Two gladiators face each other in the sand arena, one a heavily armoured Secutor "
-            "with a rectangular shield and short gladius, the other a nimble Retiarius holding "
-            "a trident and net. Thousands of Roman spectators fill the tiered marble stands, "
-            "cheering and waving coloured cloths. Shafts of late afternoon sunlight cut through "
-            "the arched openings and illuminate swirling dust in the air. The sand is ochre and "
-            "slightly worn. The gladiators armour gleams with bronze highlights. "
-            "Photorealistic, dramatic lighting, National Geographic style, shot on 35mm."
-        ),
-    ),
-    "aqueducts": RomanContent(
-        fact="Rome's aqueducts delivered over one million cubic metres of fresh water to the city every day.",
-        image_prompt=(
-            "A sweeping aerial view of a massive ancient Roman aqueduct stretching across a "
-            "sunlit Italian valley. The long arcade of perfectly proportioned stone arches recedes "
-            "into the distance toward a hilltop city. The arches cast sharp shadows on the dry "
-            "grass below. Cypress trees dot the landscape. The sky is deep blue with a few "
-            "scattered white clouds. The stone is warm travertine, weathered and ancient. "
-            "Photorealistic, golden hour light, cinematic wide angle, hyper-detailed."
-            "Photographed on a Hasselblad H6D-400C, 50mm lens, f/2.8, ISO 200,"
-            "golden hour natural light, RAW photo, photorealistic, 8K, ultra detailed, "
-            "no CGI, no illustration, no painting, hyperrealistic skin and material textures."
-            "avoid illustration style, avoid CGI, avoid painterly look, avoid anachronisms."
-        ),
-    ),
-    "default": RomanContent(
-        fact="At its peak the Roman Empire was home to 70 million people — roughly 20% of the world's population.",
-        image_prompt=(
-            "A breathtaking panoramic view of ancient Rome at its imperial peak, seen from the "
-            "Palatine Hill at sunrise. The Forum Romanum stretches below with its white marble "
-            "temples, triumphal arches and colonnaded basilicas glowing in warm golden light. "
-            "The Colosseum dominates the middle distance. Smoke rises from a hundred altars. "
-            "Citizens in white togas move along the Sacred Way. The Tiber river gleams silver "
-            "in the far background. The sky is vivid blue with dramatic clouds. "
-            "Photorealistic, epic scale, cinematic, National Geographic cover quality."
-        ),
-    ),
-}
+class _LLMSceneResponse(BaseModel):
+    """Schema the model's JSON output is constrained to."""
+
+    topic: str = Field(description="The Roman daily-life topic this content covers")
+    fact: str = Field(
+        description="One factual, historically attested sentence about the topic"
+    )
+    scene_description: str = Field(
+        description=(
+            "A vivid, detailed visual description of the scene: setting, people, "
+            "actions, objects, lighting. No camera/photography jargon — that is "
+            "added separately."
+        )
+    )
+
+
+def _load_recent_topics() -> list[str]:
+    if not _STATE_PATH.exists():
+        return []
+    try:
+        return json.loads(_STATE_PATH.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning("Could not read recent topics state, starting fresh: %s", e)
+        return []
+
+
+def _save_recent_topics(recent: list[str]) -> None:
+    try:
+        _STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _STATE_PATH.write_text(json.dumps(recent))
+    except OSError as e:
+        logger.warning("Could not persist recent topics state: %s", e)
+
+
+def _pick_topic(topic_hint: str = "") -> str:
+    # if topic_hint and topic_hint in TOPICS:
+    #     return topic_hint
+    if topic_hint:
+        return topic_hint
+
+    recent = _load_recent_topics()
+    available = [t for t in TOPICS if t not in recent] or TOPICS  # reset if exhausted
+    return random.choice(available)
+
+
+def _build_prompt(topic: str) -> str:
+    return (
+        f"Generate factual, historically grounded content about Roman daily life, "
+        f"specifically: {topic}.\n\n"
+        "Provide:\n"
+        "1. One concise, verifiably true fact about this topic from Roman history.\n"
+        "2. A vivid visual scene description suitable for an image generation model "
+        "— describe the setting, the people present, what they are doing, objects, "
+        "architecture, and lighting. Be specific and concrete. Do not include camera "
+        "or photography terminology; that will be added separately. Avoid anachronisms.\n\n"
+        "Respond with JSON only, matching the required schema."
+    )
 
 
 def generate_fact_and_prompt(topic_hint: str = "") -> RomanContent:
     """
-    Return a test Roman fact + image prompt.
+    Generate a Roman daily-life fact + image prompt via a local Ollama model.
 
     Args:
-        topic_hint: Matches against known stubs; falls back to default.
+        topic_hint: If it matches an entry in TOPICS, forces that topic.
+                    Otherwise a topic is chosen automatically, avoiding
+                    recently used ones.
 
     Returns:
         RomanContent with .fact and .image_prompt populated.
+
+    Raises:
+        RuntimeError: if the model response fails schema validation.
     """
-    key = topic_hint.lower().strip()
-    content = _STUBS.get(key, _STUBS["default"])
-    logger.info("Using stub content for topic '%s': %s", key or "default", content.fact)
-    return content
+    topic = _pick_topic(topic_hint)
+    logger.info("Generating content for topic: %s", topic)
+
+    response = client.chat(
+        model=OLLAMA_MODEL,
+        messages=[{"role": "user", "content": _build_prompt(topic)}],
+        format=_LLMSceneResponse.model_json_schema(),
+        options={"temperature": 0.7, "think.enable_thinking": False},
+        keep_alive=0,  # unload from VRAM immediately after this response
+    )
+
+    try:
+        parsed = _LLMSceneResponse.model_validate_json(response.message.content)
+    except Exception as e:
+        raise RuntimeError(
+            f"Ollama returned content that failed schema validation: {e}\n"
+            f"Raw response: {response.message.content!r}"
+        ) from e
+
+    recent = _load_recent_topics()
+    recent.append(topic)
+    _save_recent_topics(recent[-_RECENT_HISTORY_SIZE:])
+
+    image_prompt = parsed.scene_description.strip() + STYLE_SUFFIX
+    logger.info("Generated fact for '%s': %s", topic, parsed.fact)
+
+    return RomanContent(fact=parsed.fact, image_prompt=image_prompt)

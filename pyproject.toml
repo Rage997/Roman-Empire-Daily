@@ -14,29 +14,24 @@ dependencies = [
     # PyTorch — pinned to the CUDA index via [tool.uv.sources]
     "torch>=2.5.0",
     "torchvision>=0.20.0",
-
     # Anthropic SDK — fact & prompt generation
     "anthropic>=0.28.0",
-
     # Diffusers stack — local FLUX image generation
     "diffusers>=0.30.0",
     "transformers>=4.44.0",
     "accelerate>=0.33.0",
     "safetensors>=0.4.3",
     "sentencepiece>=0.2.0",
-
     # Image processing
     "Pillow>=10.4.0",
-
     # Config / settings management
     "pydantic-settings>=2.3.0",
-
     # HTTP client for Instagram Graph API
     "requests>=2.32.0",
-
     # CLI
     "click>=8.1.7",
     "bitsandbytes>=0.43.0",
+    "ollama>=0.6.2",
 ]
 
 [project.optional-dependencies]

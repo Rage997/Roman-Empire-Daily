@@ -164,4 +164,3 @@ FLUX_MODEL_ID=/mnt/models/FLUX.1-dev
 ## License
 
 MIT
-# Roman-Empire-Daily
