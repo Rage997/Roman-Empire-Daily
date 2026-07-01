@@ -16,6 +16,9 @@ Design notes:
   in Ollama, so there's no need to separately disable reasoning traces.
 - Topics are drawn from a curated list (factually safer than free
   generation) with simple recent-history avoidance to reduce repeats.
+- Previously generated facts are persisted per topic and injected into
+  the prompt as explicit exclusions, preventing near-duplicate facts
+  across runs even for the same topic.
 """
 
 import json
@@ -23,22 +26,20 @@ import logging
 import random
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 from ollama import Client
-
-client = Client(host="http://localhost:11434")  # or http://<container-name>:11434 if both are on the same docker network
-
 from pydantic import BaseModel, Field
+
+client = Client(host="http://localhost:11434")
 
 logger = logging.getLogger(__name__)
 
 OLLAMA_MODEL = "qwen3.6:27b"
 
-# Where we persist recently-used topics so repeats are avoided across runs,
-# not just within a single process.
-_STATE_PATH = Path(__file__).parent / "data" / "recent_topics.json"
+# Unified state file: tracks recent topics and all past facts per topic.
+_STATE_PATH = Path(__file__).parent / "data" / "generator_state.json"
 _RECENT_HISTORY_SIZE = 8
+_MAX_FACTS_PER_TOPIC = 10  # how many past facts to inject as exclusions per prompt
 
 # Curated topic pool. Keeping this list-driven (rather than letting the LLM
 # invent topics freely) constrains it to themes we've vetted for being
@@ -96,36 +97,53 @@ class _LLMSceneResponse(BaseModel):
     )
 
 
-def _load_recent_topics() -> list[str]:
+# ---------------------------------------------------------------------------
+# State persistence
+# ---------------------------------------------------------------------------
+
+def _load_state() -> dict:
     if not _STATE_PATH.exists():
-        return []
+        return {"recent_topics": [], "facts_by_topic": {}}
     try:
         return json.loads(_STATE_PATH.read_text())
     except (json.JSONDecodeError, OSError) as e:
-        logger.warning("Could not read recent topics state, starting fresh: %s", e)
-        return []
+        logger.warning("Could not read state, starting fresh: %s", e)
+        return {"recent_topics": [], "facts_by_topic": {}}
 
 
-def _save_recent_topics(recent: list[str]) -> None:
+def _save_state(state: dict) -> None:
     try:
         _STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _STATE_PATH.write_text(json.dumps(recent))
+        _STATE_PATH.write_text(json.dumps(state, indent=2))
     except OSError as e:
-        logger.warning("Could not persist recent topics state: %s", e)
+        logger.warning("Could not persist state: %s", e)
 
 
-def _pick_topic(topic_hint: str = "") -> str:
-    # if topic_hint and topic_hint in TOPICS:
-    #     return topic_hint
+# ---------------------------------------------------------------------------
+# Topic selection
+# ---------------------------------------------------------------------------
+
+def _pick_topic(topic_hint: str = "", recent_topics: list[str] = []) -> str:
     if topic_hint:
         return topic_hint
-
-    recent = _load_recent_topics()
-    available = [t for t in TOPICS if t not in recent] or TOPICS  # reset if exhausted
+    available = [t for t in TOPICS if t not in recent_topics] or TOPICS
     return random.choice(available)
 
 
-def _build_prompt(topic: str) -> str:
+# ---------------------------------------------------------------------------
+# Prompt construction
+# ---------------------------------------------------------------------------
+
+def _build_prompt(topic: str, previous_facts: list[str]) -> str:
+    exclusion_block = ""
+    if previous_facts:
+        formatted = "\n".join(f"- {f}" for f in previous_facts)
+        exclusion_block = (
+            f"\n\nIMPORTANT: The following facts about this topic have already been "
+            f"used. Do NOT generate anything similar to these — pick a different "
+            f"angle entirely:\n{formatted}\n"
+        )
+
     return (
         f"Generate factual, historically grounded content about Roman daily life, "
         f"specifically: {topic}.\n\n"
@@ -134,19 +152,24 @@ def _build_prompt(topic: str) -> str:
         "2. A vivid visual scene description suitable for an image generation model "
         "— describe the setting, the people present, what they are doing, objects, "
         "architecture, and lighting. Be specific and concrete. Do not include camera "
-        "or photography terminology; that will be added separately. Avoid anachronisms.\n\n"
+        "or photography terminology; that will be added separately. Avoid anachronisms.\n"
+        f"{exclusion_block}"
         "Respond with JSON only, matching the required schema."
     )
 
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 def generate_fact_and_prompt(topic_hint: str = "") -> RomanContent:
     """
     Generate a Roman daily-life fact + image prompt via a local Ollama model.
 
     Args:
-        topic_hint: If it matches an entry in TOPICS, forces that topic.
-                    Otherwise a topic is chosen automatically, avoiding
-                    recently used ones.
+        topic_hint: If provided, forces that topic (free-form string accepted).
+                    Otherwise a topic is chosen automatically from TOPICS,
+                    avoiding recently used ones.
 
     Returns:
         RomanContent with .fact and .image_prompt populated.
@@ -154,14 +177,21 @@ def generate_fact_and_prompt(topic_hint: str = "") -> RomanContent:
     Raises:
         RuntimeError: if the model response fails schema validation.
     """
-    topic = _pick_topic(topic_hint)
-    logger.info("Generating content for topic: %s", topic)
+    state = _load_state()
+    topic = _pick_topic(topic_hint, state["recent_topics"])
+
+    previous_facts = state["facts_by_topic"].get(topic, [])[-_MAX_FACTS_PER_TOPIC:]
+    logger.info(
+        "Generating content for topic '%s' (avoiding %d known facts)",
+        topic,
+        len(previous_facts),
+    )
 
     response = client.chat(
         model=OLLAMA_MODEL,
-        messages=[{"role": "user", "content": _build_prompt(topic)}],
+        messages=[{"role": "user", "content": _build_prompt(topic, previous_facts)}],
         format=_LLMSceneResponse.model_json_schema(),
-        options={"temperature": 0.7, "think.enable_thinking": False},
+        options={"temperature": 0.7},
         keep_alive=0,  # unload from VRAM immediately after this response
     )
 
@@ -173,9 +203,16 @@ def generate_fact_and_prompt(topic_hint: str = "") -> RomanContent:
             f"Raw response: {response.message.content!r}"
         ) from e
 
-    recent = _load_recent_topics()
+    # Persist updated state
+    recent = state["recent_topics"]
     recent.append(topic)
-    _save_recent_topics(recent[-_RECENT_HISTORY_SIZE:])
+    state["recent_topics"] = recent[-_RECENT_HISTORY_SIZE:]
+
+    facts = state["facts_by_topic"].get(topic, [])
+    facts.append(parsed.fact)
+    state["facts_by_topic"][topic] = facts  # full history kept; no cap on disk
+
+    _save_state(state)
 
     image_prompt = parsed.scene_description.strip() + STYLE_SUFFIX
     logger.info("Generated fact for '%s': %s", topic, parsed.fact)
