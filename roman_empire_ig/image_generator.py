@@ -79,7 +79,7 @@ def generate_image(prompt: str) -> Image.Image:
         A PIL Image at the configured resolution.
     """
 
-    logger.info("Generating image with prompt: ", prompt)
+    logger.info("Generating image with prompt: %s", prompt)
 
     pipe = _load_pipeline()
 
