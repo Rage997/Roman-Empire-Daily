@@ -4,3 +4,4 @@ __pycache__/
 *.egg-info/
 roman_empire_ig/data/recent_topics.json
 output/
+roman_empire_ig/data/

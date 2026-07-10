@@ -1,10 +1,9 @@
 # 🏛️ Roman Empire Instagram Bot
 
-Automated pipeline that generates Roman Empire facts with AI and turns them into
-cinematic images using a local FLUX model — then (optionally) posts them to Instagram.
+Automated pipeline that generates Roman Empire facts with AI and turns them into cinematic images using a local FLUX model — then (optionally) posts them to Instagram.
 
 ```
-Anthropic Claude  →  fact + image prompt
+Ollama (local GPU)  →  fact + image prompt
          ↓
 FLUX (local GPU)  →  1080×1080 image
          ↓
@@ -20,7 +19,7 @@ Instagram Graph API  →  published post
 - Python 3.11+
 - NVIDIA GPU with 24 GB VRAM (RTX 3090 / 4090) — FLUX.1-dev runs at full BF16
 - CUDA 12.1 drivers
-- An [Anthropic API key](https://console.anthropic.com/)
+- ollama running on port 11434
 - (Optional) Instagram Business account + Facebook App for posting
 
 ---
